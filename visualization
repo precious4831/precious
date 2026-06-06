@@ -1,0 +1,281 @@
+"""
+visualize_svo.py -- 生成SVO预训练可视化图 (论文用)
+
+加载预训练模型和带标签数据集, 对每个样本推断SVO角度,
+按NPC真实驾驶风格分组画分布图.
+
+生成的图:
+  1. SVO分布直方图 (按风格分组, 叠加)
+  2. SVO箱线图 (按风格分组)
+  3. 训练loss收敛曲线 (如提供tensorboard日志)
+
+使用方法:
+    python visualize_svo.py --model svo_pretrained.pt --dataset svo_dataset.npz
+    python visualize_svo.py --model svo_pretrained.pt --dataset svo_dataset.npz --output_dir figures/
+"""
+
+import os
+import argparse
+import numpy as np
+import torch
+import matplotlib.pyplot as plt
+import matplotlib
+
+matplotlib.rcParams['font.family'] = 'Times New Roman'
+matplotlib.rcParams['font.size'] = 12
+
+from config import get_default_config
+from svo_model import SVOVariationalBIRL
+
+
+def parse_args():
+    parser = argparse.ArgumentParser(description='SVO预训练可视化')
+    parser.add_argument('--model', type=str, default=r"D:\桌面\毕设代码\carla_PPO_highway 3.10改（Claude）-rssm\svo_pretrained4.pt")
+    parser.add_argument('--dataset', type=str, default=r"D:\桌面\毕设代码\carla_PPO_highway 3.10改（Claude）-rssm\pretrain_svo\svo_dataset 3.11 300ep.npz")
+    parser.add_argument('--output_dir', type=str, default='figures')
+    parser.add_argument('--device', type=str, default='auto')
+    parser.add_argument('--max_samples', type=int, default=10000,
+                        help='最大推断样本数 (太多会慢)')
+    return parser.parse_args()
+
+
+@torch.no_grad()
+def infer_svo(model, ego_past, npc_past, device, batch_size=256):
+    """批量SVO推断"""
+    model.eval()
+    N = len(ego_past)
+    all_mu = []
+    all_sigma = []
+
+    for i in range(0, N, batch_size):
+        ego_b = torch.FloatTensor(ego_past[i:i+batch_size]).to(device)
+        npc_b = torch.FloatTensor(npc_past[i:i+batch_size]).to(device)
+        mu, sigma = model.infer(npc_b, ego_b)
+        all_mu.append(mu.cpu().numpy())
+        all_sigma.append(sigma.cpu().numpy())
+
+    return np.concatenate(all_mu), np.concatenate(all_sigma)
+
+
+def plot_svo_histogram(mu_by_style, output_path):
+    """
+    Figure 1: SVO角度分布 — KDE曲线 + 淡色填充
+    KDE比叠加直方图更清晰, 不会出现绿色覆盖全区间的视觉问题
+    """
+    from scipy.stats import gaussian_kde
+    
+    fig, ax = plt.subplots(figsize=(9, 5.5))
+
+    # 五组颜色: 红橙蓝绿青, 保证相邻组可区分
+    colors = {
+        'aggressive': '#d32f2f',
+        'semi_aggressive': '#f57c00',
+        'normal': '#1976d2',
+        'semi_conservative': '#388e3c',
+        'conservative': '#00838f',   # 青色, 与绿色区分
+    }
+    labels = {
+        'aggressive': 'Aggressive',
+        'semi_aggressive': 'Semi-Aggressive',
+        'normal': 'Normal',
+        'semi_conservative': 'Semi-Conservative',
+        'conservative': 'Conservative',
+    }
+
+    x_grid = np.linspace(0, 90, 300)
+    
+    for style in ['aggressive', 'semi_aggressive', 'normal', 'semi_conservative', 'conservative']:
+        if style not in mu_by_style or len(mu_by_style[style]) == 0:
+            continue
+        data = mu_by_style[style]
+        kde = gaussian_kde(data, bw_method=0.25)
+        density = kde(x_grid)
+        
+        ax.plot(x_grid, density, color=colors[style], linewidth=2.2,
+                label=f"{labels[style]} (n={len(data)}, μ={data.mean():.1f}°)")
+        ax.fill_between(x_grid, density, alpha=0.15, color=colors[style])
+
+    ax.set_xlabel('Inferred SVO Angle (degrees)', fontsize=14)
+    ax.set_ylabel('Density', fontsize=14)
+    ax.set_title('SVO Posterior Distribution by Driving Style', fontsize=15)
+    ax.legend(fontsize=10, loc='upper right')
+    ax.set_xlim(0, 90)
+    ax.set_ylim(bottom=0)
+    ax.grid(True, alpha=0.2)
+
+    plt.tight_layout()
+    plt.savefig(output_path, dpi=300, bbox_inches='tight')
+    plt.close()
+    print(f"  KDE分布图已保存: {output_path}")
+
+
+def plot_svo_boxplot(mu_by_style, output_path):
+    """
+    Figure 2: SVO角度箱线图 — 更清晰地展示各组中位数和分布
+    """
+    fig, ax = plt.subplots(figsize=(6, 5))
+
+    data = []
+    tick_labels = []
+    colors = []
+
+    style_order = ['aggressive', 'semi_aggressive', 'normal', 'semi_conservative', 'conservative']
+    color_map = {
+        'aggressive': '#d32f2f', 'semi_aggressive': '#f57c00',
+        'normal': '#1976d2',
+        'semi_conservative': '#388e3c', 'conservative': '#00838f',
+    }
+    label_map = {
+        'aggressive': 'Aggr.', 'semi_aggressive': 'Semi-A.',
+        'normal': 'Normal',
+        'semi_conservative': 'Semi-C.', 'conservative': 'Cons.',
+    }
+
+    for style in style_order:
+        if style in mu_by_style and len(mu_by_style[style]) > 0:
+            data.append(mu_by_style[style])
+            tick_labels.append(f"{label_map[style]}\n(n={len(mu_by_style[style])})")
+            colors.append(color_map[style])
+
+    bp = ax.boxplot(data, patch_artist=True, widths=0.5,
+                    medianprops=dict(color='black', linewidth=2))
+
+    for patch, color in zip(bp['boxes'], colors):
+        patch.set_facecolor(color)
+        patch.set_alpha(0.6)
+
+    ax.set_xticklabels(tick_labels, fontsize=12)
+    ax.set_ylabel('Inferred SVO Angle (degrees)', fontsize=14)
+    ax.set_title('SVO Inference by Driving Style', fontsize=15)
+    ax.set_ylim(0, 90)
+    ax.grid(True, alpha=0.3, axis='y')
+
+    # 标注理想范围
+    ax.axhspan(0, 20, alpha=0.08, color='red', label='Aggressive range')
+    ax.axhspan(30, 60, alpha=0.08, color='blue', label='Normal range')
+    ax.axhspan(60, 90, alpha=0.08, color='green', label='Conservative range')
+
+    plt.tight_layout()
+    plt.savefig(output_path, dpi=300, bbox_inches='tight')
+    plt.close()
+    print(f"  箱线图已保存: {output_path}")
+
+
+def plot_mu_sigma_scatter(mu_by_style, sigma_by_style, output_path):
+    """
+    Figure 3: μ-σ 散点图 — 展示不确定性分布
+    """
+    fig, ax = plt.subplots(figsize=(8, 5))
+
+    colors = {
+        'aggressive': '#d32f2f', 'semi_aggressive': '#f57c00',
+        'normal': '#1976d2',
+        'semi_conservative': '#388e3c', 'conservative': '#00838f',
+    }
+    labels = {
+        'aggressive': 'Aggressive', 'semi_aggressive': 'Semi-Aggr.',
+        'normal': 'Normal',
+        'semi_conservative': 'Semi-Cons.', 'conservative': 'Conservative',
+    }
+
+    for style in ['aggressive', 'semi_aggressive', 'normal', 'semi_conservative', 'conservative']:
+        if style in mu_by_style and len(mu_by_style[style]) > 0:
+            ax.scatter(mu_by_style[style], sigma_by_style[style],
+                       alpha=0.3, s=10, c=colors[style], label=labels[style])
+
+    ax.set_xlabel('SVO μ (degrees)', fontsize=14)
+    ax.set_ylabel('SVO σ (degrees)', fontsize=14)
+    ax.set_title('SVO Posterior: Mean vs Uncertainty', fontsize=15)
+    ax.legend(fontsize=11)
+    ax.set_xlim(0, 90)
+    ax.grid(True, alpha=0.3)
+
+    plt.tight_layout()
+    plt.savefig(output_path, dpi=300, bbox_inches='tight')
+    plt.close()
+    print(f"  散点图已保存: {output_path}")
+
+
+def main():
+    args = parse_args()
+
+    # 设备
+    if args.device == 'auto':
+        device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    else:
+        device = torch.device(args.device)
+
+    # 输出目录
+    os.makedirs(args.output_dir, exist_ok=True)
+
+    # 加载数据集
+    print(f"加载数据集: {args.dataset}")
+    data = np.load(args.dataset, allow_pickle=True)
+    ego_past = data['ego_past']
+    npc_past = data['npc_past']
+
+    if 'styles' in data:
+        styles = data['styles']
+        print(f"  样本数: {len(ego_past)}, 含风格标签")
+    else:
+        styles = np.array(['unknown'] * len(ego_past))
+        print(f"  样本数: {len(ego_past)}, 无风格标签 (旧版数据集)")
+        print(f"  建议重新运行 data_collector.py 以获取风格标签")
+
+    # 限制样本数
+    if len(ego_past) > args.max_samples:
+        idx = np.random.choice(len(ego_past), args.max_samples, replace=False)
+        ego_past = ego_past[idx]
+        npc_past = npc_past[idx]
+        styles = styles[idx]
+        print(f"  采样至 {args.max_samples} 条")
+
+    # 加载模型
+    print(f"加载模型: {args.model}")
+    config = get_default_config()
+    model = SVOVariationalBIRL(config).to(device)
+    ckpt = torch.load(args.model, map_location=device)
+    if 'svo_birl' in ckpt:
+        model.load_state_dict(ckpt['svo_birl'])
+    else:
+        model.load_state_dict(ckpt)
+
+    # 推断
+    print("运行SVO推断...")
+    mu_all, sigma_all = infer_svo(model, ego_past, npc_past, device)
+
+    # 按风格分组
+    mu_by_style = {}
+    sigma_by_style = {}
+    for style in np.unique(styles):
+        mask = (styles == style)
+        mu_by_style[style] = mu_all[mask]
+        sigma_by_style[style] = sigma_all[mask]
+        print(f"  {style}: n={mask.sum()}, μ={mu_all[mask].mean():.1f}°±{mu_all[mask].std():.1f}°, "
+              f"σ={sigma_all[mask].mean():.2f}°")
+
+    # 画图
+    print("\n生成图表...")
+    plot_svo_histogram(mu_by_style,
+                       os.path.join(args.output_dir, 'svo_histogram.png'))
+    plot_svo_boxplot(mu_by_style,
+                     os.path.join(args.output_dir, 'svo_boxplot.png'))
+    plot_mu_sigma_scatter(mu_by_style, sigma_by_style,
+                          os.path.join(args.output_dir, 'svo_scatter.png'))
+
+    # 汇总统计 (可直接写入论文)
+    print("\n" + "=" * 60)
+    print("论文数据汇总:")
+    print(f"{'Style':<15} {'n':>6} {'μ mean':>8} {'μ std':>8} {'σ mean':>8}")
+    print("-" * 50)
+    for style in ['aggressive', 'semi_aggressive', 'normal', 'semi_conservative', 'conservative']:
+        if style in mu_by_style:
+            m = mu_by_style[style]
+            s = sigma_by_style[style]
+            print(f"{style:<15} {len(m):>6} {m.mean():>8.1f}° {m.std():>8.1f}° {s.mean():>8.2f}°")
+    print("=" * 60)
+    print(f"\n图表保存至: {os.path.abspath(args.output_dir)}/")
+
+
+if __name__ == "__main__":
+    main()

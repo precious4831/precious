@@ -1,0 +1,41 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "PPO Model",
+      "type": "python",
+      "request": "launch",
+      "module": "src.algorithms.ppo_model",
+      "cwd": "${workspaceFolder}",
+      "console": "integratedTerminal",
+      "justMyCode": true
+    },
+    {
+      "name": "Train",
+      "type": "python",
+      "request": "launch",
+      "program": "${workspaceFolder}/train.py",
+      "cwd": "${workspaceFolder}",
+      "console": "integratedTerminal",
+      "justMyCode": true
+    },
+    {
+      "name": "Test",
+      "type": "python",
+      "request": "launch",
+      "program": "${workspaceFolder}/test.py",
+      "cwd": "${workspaceFolder}",
+      "console": "integratedTerminal",
+      "justMyCode": true
+    },
+    {
+      "name": "Pretrain SVO",
+      "type": "python",
+      "request": "launch",
+      "program": "${workspaceFolder}/pretrain_svo.py",
+      "cwd": "${workspaceFolder}",
+      "console": "integratedTerminal",
+      "justMyCode": true
+    }
+  ]
+}
