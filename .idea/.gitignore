@@ -1,3 +1,11 @@
 # 默认忽略的文件
 /shelf/
 /workspace.xml
+# TensorBoard 日志
+runs/
+events.out.tfevents.*
+# 模型/数据文件
+*.npz
+*.pth
+*.ckpt
+*.pt
