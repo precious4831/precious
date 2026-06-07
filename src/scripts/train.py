@@ -127,7 +127,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--log_freq", type=int, default=2048)
 
     # 恢复训练
-    parser.add_argument("--resume", type=str, default=None, help="恢复训练的 checkpoint 路径")
+    parser.add_argument("--resume", type=str, default=r"D:\桌面\投稿\SVO-CVaR\outputs\L2\train_20260606_154757\models\interrupted_step177792.pth", help="恢复训练的 checkpoint 路径")
 
     # 算法选择
     parser.add_argument("--algo", type=str, default="spo", choices=["ppo", "dapo", "spo"])
