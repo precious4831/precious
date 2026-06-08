@@ -314,10 +314,10 @@ class RewardConfig:
     max_speed: float = 80.0
 
     speed_reward_weight: float = 1.5   # 速度奖励权重 (v8: 1.0 → 1.5, 旧版; 提高速度奖励权重, 鼓励更积极的巡航)
-    low_speed_penalty: float = -1.0    # stronger low-speed penalty to discourage standing still
+    low_speed_penalty: float = -0.3    # stronger low-speed penalty to discourage standing still
 
     # 车道相关
-    lane_keeping_weight: float = 0.6   # v8: 0.6 → 0.5 (旧版)
+    lane_keeping_weight: float = 0.5   # v8: 0.6 → 0.5 (旧版)
     max_lateral_offset: float = 1.0     # v8: 1.5 → 1.0 (旧版: 超过1米开始惩罚, 4米触发终止; 回归后超过1米就惩罚, 超过4米终止)  
     terminal_lateral_offset: float = 4.0   # v8: 5.0 → 4.0 (旧版: 偏4米以上触发终止)
     terminal_cross_two_lanes_penalty: float = -120.0 # v8: -100 → -120 (旧版: 直接惩罚跨两条车道, 避免 BV 那种"先变道到旁边车道, 再变回目标车道"的怪异行为)
@@ -331,10 +331,10 @@ class RewardConfig:
     collision_penalty: float = -200.0   # v8: -100 → -200 (旧版)
 
     # 平滑/舒适
-    steering_penalty_weight: float = 0.2   # v8: 0.12 → 0.1 (旧版)
+    steering_penalty_weight: float = 0.15   # v8: 0.12 → 0.1 (旧版)
 
     # 时间/目标
-    progress_reward: float = 0.0       # remove fixed alive bonus while debugging the "ego not moving" issue
+    progress_reward: float = 0.05       # remove fixed alive bonus while debugging the "ego not moving" issue
     time_penalty: float = -0.05        # v8: -0.1 → -0.05 (旧版)
     reach_goal_reward: float = 100.0
 
@@ -420,7 +420,7 @@ class PPOConfig:
     cvar_lambda_max: float = 0.2
     cvar_cost_coef: float = 0.3         
     cost_value_coef: float = 0.5             # 兼容字段, 当前未使用
-    cost_loss_coef: float = 1.0
+    cost_loss_coef: float = 0.3               # CVaR loss 在总 loss 中的权重 (与 value_coef, entropy_coef 同级别)
     # SVO -> 紧迫度: u = w_mu*(1 - mu/90) + w_sigma*(sigma/prior_sigma)
     svo_mu_budget_weight: float = 0.5
     svo_sigma_budget_weight: float = 0.5
