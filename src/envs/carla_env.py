@@ -115,6 +115,7 @@ class CarlaEnv(gym.Env):
         self._ep_lane_change_right = 0
         self._ep_lane_change_unknown = 0
         self._step_waypoint_progress = 0
+        self._last_selected_neighbors = []
         self._last_applied_steer = 0.0
 
         # ===== 历史轨迹缓冲区 (Transformer编码器需要) =====
@@ -1149,6 +1150,7 @@ class CarlaEnv(gym.Env):
 
         cands.sort(key=lambda x: x[1])
         selected = [c[0] for c in cands[:N]]
+        self._last_selected_neighbors = list(selected)
 
         # ---- 3. 构建轨迹 (1+N, T, 5) ----
         trajs = np.zeros((1 + N, T, 5), dtype=np.float32)
@@ -1394,25 +1396,15 @@ class CarlaEnv(gym.Env):
             self.reward_history.append(r_ego)
             return r_ego
 
-        # L2 模式: Toghi 2022 公式
-        theta_rad = self._get_svo_theta()   # 根据 use_oracle_svo 自动选 oracle / BIRL
-        r_others = self._compute_others_reward()
-        r_others_norm = float(np.clip(r_others / 6.0, -1.0, 1.0))
-
-        reward = (math.cos(theta_rad) * r_ego
-                  + math.sin(theta_rad) * r_others_norm * 2.0)
-
-        # 调试用 reward components (供 render/tensorboard 读取)
+        # L2: inferred NPC SVO is used by obs/CVaR/SPO, not as ego reward weight.
         self._last_reward_components = {
             'r_ego': float(r_ego),
-            'r_others': float(r_others),
-            'r_others_norm': float(r_others_norm),
-            'theta_deg': float(math.degrees(theta_rad)),
-            'r_total': float(reward),
+            'r_others': 0.0,
+            'r_others_norm': 0.0,
+            'r_total': float(r_ego),
         }
-
-        self.reward_history.append(reward)
-        return reward
+        self.reward_history.append(r_ego)
+        return r_ego
 
     def _get_svo_theta(self):
         """获取 SVO θ (弧度), 根据 use_oracle_svo 开关在 Oracle / BIRL 间切换.
@@ -2027,6 +2019,7 @@ class CarlaEnv(gym.Env):
         self._svo_interact_mask = None
         self._svo_risk_penalty = 0.0
         self._svo_display_info = {}  # [NEW] SVO可视化信息
+        self._last_selected_neighbors = []
 
         # [Level-k] 重置BV策略控制状态
         if self.klevel_controller is not None:
@@ -2227,7 +2220,8 @@ class CarlaEnv(gym.Env):
             info['r_ego'] = float(comp.get('r_ego', 0.0))
             info['r_others'] = float(comp.get('r_others', 0.0))
             info['r_others_norm'] = float(comp.get('r_others_norm', 0.0))
-            info['theta_deg'] = float(comp.get('theta_deg', 45.0))
+            if 'theta_deg' in comp:
+                info['theta_deg'] = float(comp['theta_deg'])
             info['r_total'] = float(comp.get('r_total', 0.0))
         return obs, reward, done, info
 
@@ -2362,53 +2356,82 @@ class CarlaEnv(gym.Env):
                 self.display.blit(val, (panel_x + 120, y))
                 y += 20
 
-            # 显示每辆交互车的SVO (新增: 每辆的相对位置, 方便核对)
-            # 为此需要重建 selected 列表, 与 _get_observation 中的顺序一致
-            # [v8] 不再用 _start_lane_forward/right (已删), 改用 ego 自身朝向
+            # Show SVO for the key interaction vehicles: adjacent-lane rear
+            # traffic and side-by-side vehicles. The neighbor order is reused
+            # from _get_observation so N{i} is aligned with svo_mu[i].
             ego_loc_now = self.ego_vehicle.get_location() if self.ego_vehicle else None
-            det_r = self.config.observation.detection_radius
-            selected_info = []  # [(rel_long, rel_lat, dist, lane_id, is_obs), ...]
+            selected_neighbors = getattr(self, '_last_selected_neighbors', [])
+            selected_info = []
             if ego_loc_now is not None:
                 ego_fwd_vec = self.ego_vehicle.get_transform().get_forward_vector()
                 fnorm = math.sqrt(ego_fwd_vec.x ** 2 + ego_fwd_vec.y ** 2) + 1e-8
                 fx, fy = ego_fwd_vec.x / fnorm, ego_fwd_vec.y / fnorm
-                rx_s, ry_s = fy, -fx   # 右向 = 前向顺时针转 90°
+                rx_s, ry_s = fy, -fx
 
-                cands_dbg = []
-                if self.obstacle_vehicle and self.obstacle_vehicle.is_alive:
-                    d_obs = self.obstacle_vehicle.get_location().distance(ego_loc_now)
-                    cands_dbg.append((self.obstacle_vehicle, d_obs, True))
-                for npc in self.npc_vehicles:
-                    if not npc.is_alive:
+                for i, veh in enumerate(selected_neighbors[:len(svo_mu)]):
+                    if veh is None or not veh.is_alive:
                         continue
-                    d = npc.get_location().distance(ego_loc_now)
-                    if d < det_r:
-                        cands_dbg.append((npc, d, False))
-                cands_dbg.sort(key=lambda x: x[1])
-                for veh, d, is_obs in cands_dbg[:5]:
                     vl = veh.get_location()
                     dx = vl.x - ego_loc_now.x
                     dy = vl.y - ego_loc_now.y
                     rel_long = dx * fx + dy * fy
                     rel_lat = dx * rx_s + dy * ry_s
+                    d = math.sqrt(dx * dx + dy * dy)
                     try:
                         wp = self.map.get_waypoint(vl)
                         lid = wp.lane_id if wp else 0
                     except Exception:
                         lid = 0
-                    selected_info.append((rel_long, rel_lat, d, lid, is_obs))
+                    is_obs = (
+                        self.obstacle_vehicle is not None
+                        and veh.id == self.obstacle_vehicle.id
+                    )
+                    is_adjacent = 2.0 <= abs(rel_lat) <= 6.5
+                    is_rear_or_parallel = -35.0 <= rel_long <= 12.0
+                    is_key = is_adjacent and is_rear_or_parallel and not is_obs
+                    priority = 0 if is_key else 1
+                    selected_info.append({
+                        'idx': i,
+                        'rel_long': rel_long,
+                        'rel_lat': rel_lat,
+                        'dist': d,
+                        'lane_id': lid,
+                        'is_obs': is_obs,
+                        'is_key': is_key,
+                        'priority': priority,
+                    })
 
-            # 显示每辆交互车的SVO
-            for i in range(min(len(svo_mu), 5)):
-                if np.abs(svo_mu[i] - 45.0) < 0.1 and not interact_mask[i]:
-                    continue  # 跳过默认先验值(无真实NPC)
+            key_rows = [row for row in selected_info if row['is_key']]
+            if not key_rows:
+                key_rows = [
+                    row for row in selected_info
+                    if row['idx'] < len(interact_mask) and bool(interact_mask[row['idx']])
+                ]
+            key_rows.sort(key=lambda row: (
+                row['priority'],
+                abs(row['rel_long']),
+                abs(row['rel_lat']),
+                row['dist'],
+            ))
+
+            if key_rows:
+                key_title = self.font_small.render("Key adjacent SVO:", True, (180, 220, 255))
+                self.display.blit(key_title, (panel_x + 10, y))
+                y += 20
+            else:
+                no_key = self.font_small.render("Key adjacent SVO: none", True, (150, 150, 150))
+                self.display.blit(no_key, (panel_x + 10, y))
+                y += 20
+
+            for row in key_rows[:4]:
+                i = row['idx']
                 mu_val = svo_mu[i]
-                # SVO角度→颜色: 红(0°)→黄(45°)→绿(90°)
+                sigma_val = svo_sigma[i] if i < len(svo_sigma) else 0.0
                 r = int(max(0, min(255, 255 - mu_val * 255 / 90)))
                 g = int(max(0, min(255, mu_val * 255 / 90)))
                 color = (r, g, 80)
-                tag = "L1" if interact_mask[i] else "L0"
-                # SVO角度→风格标签
+                is_active = i < len(interact_mask) and bool(interact_mask[i])
+                tag = "I" if is_active else "P"
                 if mu_val < 25:
                     style = "Aggr"
                 elif mu_val < 40:
@@ -2420,16 +2443,13 @@ class CarlaEnv(gym.Env):
                 else:
                     style = "Cons"
 
-                # [新] 附加每辆NPC的位置信息, 方便核对可视化
-                pos_str = ""
-                if i < len(selected_info):
-                    rel_long, rel_lat, d, lid, is_obs = selected_info[i]
-                    fb = "前" if rel_long > 0 else "后"
-                    lr = "右" if rel_lat > 0 else "左"
-                    obs_tag = "[OBS]" if is_obs else ""
-                    pos_str = f" {fb}{abs(rel_long):.0f}m{lr}{abs(rel_lat):.1f}m L{lid}{obs_tag}"
-
-                txt = f"N{i}:{mu_val:.0f}°({style})[{tag}]{pos_str}"
+                fb = "F" if row['rel_long'] > 0 else "R"
+                lr = "Rt" if row['rel_lat'] > 0 else "Lt"
+                txt = (
+                    f"N{i} {fb}{abs(row['rel_long']):.0f}m "
+                    f"{lr}{abs(row['rel_lat']):.1f}m "
+                    f"mu={mu_val:.0f} sig={sigma_val:.0f} {style}[{tag}]"
+                )
                 surf = self.font_small.render(txt, True, color)
                 self.display.blit(surf, (panel_x + 10, y))
                 y += 18
